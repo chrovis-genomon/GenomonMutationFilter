@@ -9,6 +9,7 @@ import scipy.special
 from scipy.stats import fisher_exact as fisher
 import math
 from . import vcf_utils
+from . import sam2psl
 import collections
 import vcf
 import copy
@@ -19,13 +20,14 @@ import multiprocessing
 #
 class Realignment_filter:
 
-    def __init__(self,referenceGenome,tumor_min_mismatch,normal_max_mismatch, search_length, score_difference, blat, header_flag, max_depth, exclude_sam_flags, thread_num):
+    def __init__(self,referenceGenome,tumor_min_mismatch,normal_max_mismatch, search_length, score_difference, bwa_path, bwa_option, header_flag, max_depth, exclude_sam_flags, thread_num):
         self.reference_genome = referenceGenome
         self.window = search_length
         self.score_difference = score_difference
         self.tumor_min_mismatch = tumor_min_mismatch
         self.normal_max_mismatch = normal_max_mismatch
-        self.blat_cmds = [blat, '-fine']
+        self.bwa_cmd = bwa_path
+        self.bwa_option = bwa_option
         self.complement = {'A': 'T', 'C': 'G', 'G': 'C', 'T': 'A', 'N': 'N'}
         self.header_flag = header_flag
         self.max_depth = max_depth
@@ -195,19 +197,40 @@ class Realignment_filter:
         return([len(set(numRef)), len(set(numAlt)), len(set(numOther))])
     
 
+    def fasta2fastq(self, input_file, output_file):
+        with open(input_file) as r, open(output_file, 'w') as w:
+            lines = []
+            for line in r:
+                lines.append(line)
+                if len(lines) == 2:
+                    w.write(re.sub('^>', '@', lines[0]))
+                    w.write(lines[1])
+                    w.write('+\n')
+                    w.write('!' * (len(lines[1])-1)); w.write('\n')
+                    lines = []
+
     ############################################################
-    def blat_read_count(self, samfile,chr,start,end,output, thread_idx):
+    def bwa_read_count(self, samfile,chr,start,end,output, thread_idx):
 
         # extract short reads from tumor sequence data around the candidate
         self.extractRead(samfile,chr,start,end,output + ".tmp.fa")
         ref, alt, other = 0, 0, 0
-        if os.path.getsize(output + ".tmp.fa") > 0: 
+        if os.path.getsize(output + ".tmp.fa") > 0:
+            with open(os.devnull, 'w') as FNULL:
+                subprocess.check_call([self.bwa_cmd, 'index', output + ".tmp.refalt.fa"],
+                                      stdout=FNULL, stderr=subprocess.STDOUT)
+            self.fasta2fastq(output + ".tmp.fa", output + ".tmp.fastq")
+            bwa_options = self.bwa_option.split() if self.bwa_option else []
             # alignment tumor short reads to the reference and alternative sequences
-            FNULL = open(os.devnull, 'w')
-            subprocess.check_call(self.blat_cmds + [output + ".tmp.refalt.fa", output + ".tmp.fa", output + ".tmp.psl"], 
-                              stdout = FNULL, stderr = subprocess.STDOUT)
-            FNULL.close()
+            with open(output + ".tmp.sam", 'w') as w, open(os.devnull, 'w') as FNULL:
+                subprocess.check_call(
+                    [self.bwa_cmd, 'mem'] + bwa_options + [
+                        output + ".tmp.refalt.fa",
+                        output + ".tmp.fastq"
+                    ], stdout=w, stderr=FNULL
+                )
             # summarize alignment results
+            sam2psl.convert(output + ".tmp.sam", output + ".tmp.psl")
             ref, alt, other = self.summarizeRefAlt(output + ".tmp.psl")
         return (ref, alt, other)
 
@@ -301,10 +324,10 @@ class Realignment_filter:
                 self.makeTwoReference(chr,start,end,ref,alt,output + ".tmp.refalt.fa")
 
                 if tumor_align_file.count(chr,start,end) < self.max_depth:
-                    tumor_ref, tumor_alt, tumor_other = self.blat_read_count(tumor_align_file, chr, start, end, output, thread_idx)
+                    tumor_ref, tumor_alt, tumor_other = self.bwa_read_count(tumor_align_file, chr, start, end, output, thread_idx)
 
                 if normal_align_file.count(chr,start,end) < self.max_depth:
-                    normal_ref, normal_alt, normal_other = self.blat_read_count(normal_align_file, chr, start, end, output, thread_idx)
+                    normal_ref, normal_alt, normal_other = self.bwa_read_count(normal_align_file, chr, start, end, output, thread_idx)
 
                 if tumor_ref != '---' and  tumor_alt != '---' and  normal_ref != '---' and  normal_alt != '---':
                     log10_fisher_pvalue = self.calc_fisher_pval(tumor_ref, normal_ref, tumor_alt, normal_alt)
@@ -352,7 +375,7 @@ class Realignment_filter:
             if tumor_align_file.count(chr,start,end) < self.max_depth and int(start) >= int(self.window) :
 
                 self.makeTwoReference(chr,start,end,ref,alt,output + ".tmp.refalt.fa")
-                tumor_ref, tumor_alt, tumor_other = self.blat_read_count(tumor_align_file, chr, start, end, output, thread_idx)
+                tumor_ref, tumor_alt, tumor_other = self.bwa_read_count(tumor_align_file, chr, start, end, output, thread_idx)
                 beta_01, beta_mid, beta_09 = self.calc_btdtri(tumor_ref, tumor_alt)
 
             if (tumor_alt == '---' or tumor_alt >= self.tumor_min_mismatch):
@@ -443,16 +466,15 @@ class Realignment_filter:
                 self.filter_main_single(in_tumor_bam, in_mutation_file, output, 1, False)
 
         ####
-        for idx in range(1, thread_num_mod+1): 
-            if os.path.exists(in_mutation_file +"."+str(idx)): os.unlink(in_mutation_file +"."+str(idx))
-            if os.path.exists(output +"."+str(idx)): os.unlink(output +"."+str(idx))
-            if os.path.exists(output +"."+str(idx)+ ".tmp.refalt.fa"): os.unlink(output +"."+str(idx)+ ".tmp.refalt.fa")
-            if os.path.exists(output +"."+str(idx)+ ".tmp.fa"): os.unlink(output +"."+str(idx)+ ".tmp.fa")
-            if os.path.exists(output +"."+str(idx)+ ".tmp.psl"): os.unlink(output +"."+str(idx)+ ".tmp.psl")
-        if os.path.exists(output + ".tmp.refalt.fa"): os.unlink(output + ".tmp.refalt.fa")
-        if os.path.exists(output + ".tmp.fa"): os.unlink(output + ".tmp.fa")
-        if os.path.exists(output + ".tmp.psl"): os.unlink(output + ".tmp.psl")
-
+        suffixes = [".tmp.refalt.fa", ".tmp.refalt.fa.amb", ".tmp.refalt.fa.ann",
+                    ".tmp.refalt.fa.bwt", ".tmp.refalt.fa.pac", ".tmp.refalt.fa.sa",
+                    ".tmp.fa", ".tmp.fastq", ".tmp.sam", ".tmp.psl"]
+        for idx in range(1, thread_num_mod+1):
+            self.remove_file_safely(in_mutation_file + "." + str(idx))
+            for suffix in [""] + suffixes:
+                self.remove_file_safely(output + "." + str(idx) + suffix)
+        for suffix in suffixes:
+            self.remove_file_safely(output + suffix)
 
     ############################################################
     def add_meta_vcf(self, vcf_reader, is_TN_pair):
@@ -538,10 +560,10 @@ class Realignment_filter:
                     self.makeTwoReference(chr,start,end,ref,alt,output + ".tmp.refalt.fa")
     
                     if tumor_align_file.count(chr,start,end) < self.max_depth and is_conv:
-                        tumor_ref, tumor_alt, tumor_other = self.blat_read_count(tumor_align_file, chr, start, end, output, thread_idx)
+                        tumor_ref, tumor_alt, tumor_other = self.bwa_read_count(tumor_align_file, chr, start, end, output, thread_idx)
                     
                     if normal_align_file.count(chr,start,end) < self.max_depth and is_conv:
-                        normal_ref, normal_alt, normal_other = self.blat_read_count(normal_align_file, chr, start, end, output, thread_idx)
+                        normal_ref, normal_alt, normal_other = self.bwa_read_count(normal_align_file, chr, start, end, output, thread_idx)
     
                 if tumor_ref != '.' and  tumor_alt != '.' and  normal_ref != '.' and  normal_alt != '.':
                     log10_fisher_pvalue = self.calc_fisher_pval(tumor_ref, normal_ref, tumor_alt, normal_alt)
@@ -615,7 +637,7 @@ class Realignment_filter:
                    
                 if tumor_align_file.count(chr,start,end) < self.max_depth and int(start) >= int(self.window) :
                     self.makeTwoReference(chr,start,end,ref,alt,output + ".tmp.refalt.fa")
-                    tumor_ref, tumor_alt, tumor_other = self.blat_read_count(tumor_align_file, chr, start, end, output, thread_idx)
+                    tumor_ref, tumor_alt, tumor_other = self.bwa_read_count(tumor_align_file, chr, start, end, output, thread_idx)
                     beta_01, beta_mid, beta_09 = self.calc_btdtri(tumor_ref, tumor_alt)
     
                 if (tumor_alt == '' or tumor_alt >= self.tumor_min_mismatch):
@@ -725,12 +747,16 @@ class Realignment_filter:
                 self.filter_main_single_vcf(in_tumor_bam, in_mutation_file, output, tumor_sample, 1)
 
         ####
-        for idx in range(1, thread_num_mod+1): 
-            if os.path.exists(in_mutation_file +"."+str(idx)): os.unlink(in_mutation_file +"."+str(idx))
-            if os.path.exists(output +"."+str(idx)): os.unlink(output +"."+str(idx))
-            if os.path.exists(output +"."+str(idx)+ ".tmp.refalt.fa"): os.unlink(output +"."+str(idx)+ ".tmp.refalt.fa")
-            if os.path.exists(output +"."+str(idx)+ ".tmp.fa"): os.unlink(output +"."+str(idx)+ ".tmp.fa")
-            if os.path.exists(output +"."+str(idx)+ ".tmp.psl"): os.unlink(output +"."+str(idx)+ ".tmp.psl")
-        if os.path.exists(output + ".tmp.refalt.fa"): os.unlink(output + ".tmp.refalt.fa")
-        if os.path.exists(output + ".tmp.fa"): os.unlink(output + ".tmp.fa")
-        if os.path.exists(output + ".tmp.psl"): os.unlink(output + ".tmp.psl")
+        suffixes = [".tmp.refalt.fa", ".tmp.refalt.fa.amb", ".tmp.refalt.fa.ann",
+                    ".tmp.refalt.fa.bwt", ".tmp.refalt.fa.pac", ".tmp.refalt.fa.sa",
+                    ".tmp.fa", ".tmp.fastq", ".tmp.sam", ".tmp.psl"]
+        for idx in range(1, thread_num_mod+1):
+            self.remove_file_safely(in_mutation_file + "." + str(idx))
+            for suffix in [""] + suffixes:
+                self.remove_file_safely(output + "." + str(idx) + suffix)
+        for suffix in suffixes:
+            self.remove_file_safely(output + suffix)
+
+    def remove_file_safely(self, file):
+        if os.path.exists(file):
+            os.unlink(file)
