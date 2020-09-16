@@ -38,6 +38,8 @@ RUN echo "deb http://deb.debian.org/debian stretch main" > /etc/apt/sources.list
     make && \
     make install
 
+COPY . /tools/GenomonMutationFilter
+
 # python package
 RUN pip install --upgrade pip
 RUN pip install pysam==0.15.1 && \
@@ -46,7 +48,6 @@ RUN pip install pysam==0.15.1 && \
     pip install PyVCF==0.6.8 && \
     \
     cd /tools && \
-    git clone -b feature/blat-replacement https://github.com/chrovis-genomon/GenomonMutationFilter.git && \
     cd GenomonMutationFilter && \
     python setup.py install && \
     \
