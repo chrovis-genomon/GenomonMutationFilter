@@ -46,6 +46,7 @@ RUN pip install pysam==0.15.1 && \
     pip install numpy==1.15.2 && \
     pip install scipy==1.1.0 && \
     pip install PyVCF==0.6.8 && \
+    pip install edlib==1.3.8.post1 && \
     \
     cd /tools && \
     cd GenomonMutationFilter && \
