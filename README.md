@@ -1,5 +1,7 @@
 # GenomonMutationFilter
 
+[![build](https://github.com/chrovis-genomon/GenomonMutationFilter/workflows/build/badge.svg)](https://github.com/chrovis-genomon/GenomonMutationFilter/actions)
+
 GenomonMutationFilter is a software package for filtering false poistive somatic mutations from cancer genome sequencing data.
 
 ## Dependency
