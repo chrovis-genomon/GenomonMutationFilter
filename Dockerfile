@@ -41,7 +41,7 @@ RUN echo "deb http://deb.debian.org/debian stretch main" > /etc/apt/sources.list
 COPY . /tools/GenomonMutationFilter
 
 # python package
-RUN pip install --upgrade pip
+RUN pip install 'pip>=20,<21'
 RUN pip install pysam==0.15.1 && \
     pip install numpy==1.15.2 && \
     pip install scipy==1.1.0 && \
